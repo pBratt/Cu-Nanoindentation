@@ -1,0 +1,82 @@
+# ----------------- 1. Initialization -----------------
+units           metal
+dimension       3
+boundary        p p s    # Periodic in x and y, shrink-wrapped (free) in z
+atom_style      atomic
+
+# ----------------- 2. System Setup (Cu FCC) ----------
+lattice         fcc 3.615
+region          box block 0 20 0 20 0 15
+create_box      1 box
+create_atoms    1 box
+
+mass            1 63.546
+
+# Define regions: fixed bottom (2 lattice units), thermostat (2 units), Newtonian bulk
+region          bottom block INF INF INF INF 0 2
+region          thermo block INF INF INF INF 2 4
+region          bulk block INF INF INF INF 4 INF
+
+group           bottom_atoms region bottom
+group           thermo_atoms region thermo
+group           bulk_atoms region bulk
+group           mobile union thermo_atoms bulk_atoms
+
+# ----------------- 3. Interatomic Potential ----------
+# Updated to use the Mishin 2001 eam/alloy potential
+pair_style      eam/alloy
+pair_coeff      * * Cu01.eam.alloy Cu
+
+# ----------------- 4. Equilibration ------------------
+# Fix bottom layer to mimic bulk substrate
+fix             1 bottom_atoms setforce 0.0 0.0 0.0
+
+# Energy Minimization
+min_style       cg
+minimize        1.0e-10 1.0e-10 1000 10000
+
+# Thermal Equilibration at 300K via NVT
+velocity        mobile create 300.0 87287 loop geom
+fix             2 thermo_atoms nvt temp 300.0 300.0 0.1
+fix             3 bulk_atoms nve
+compute         temp_mobile mobile temp
+thermo          1000
+thermo_modify   temp temp_mobile
+timestep        0.002
+run             10000   # 20 ps equilibration
+
+# ----------------- 5. Indentation Setup --------------
+# Define virtual spherical indenter (Radius = 30 Angstroms)
+variable        R equal 30.0
+variable        z_surface equal bound(all,zmax)
+variable        z_indenter equal ${z_surface}+${R}+2.0
+
+# Indenter velocity (Angstroms/ps)
+variable        v_in equal -0.1  
+
+# Define fix indent (Force constant K = 10 eV/A^3)
+fix             4 all indent 10.0 sphere 36.15 36.15 v_z_indenter ${R} units box
+
+# Variables for output: depth and z-force
+# UPDATED LINE: using v_z_indenter instead of ${z_indenter} so depth updates dynamically
+variable        depth equal ${z_surface}-(v_z_indenter-${R})
+variable        fz equal f_4[3]
+
+# Output force-displacement data to text file
+fix             5 all print 100 "${depth} ${fz}" file force_depth.txt screen no title "Depth(A) Force(eV/A)"
+
+# Dump trajectory for OVITO
+dump            1 all custom 500 dump.indent id type x y z
+dump_modify     1 sort id
+
+# ----------------- 6. Loading Simulation -------------
+# Move indenter down
+variable        z_indenter equal ${z_surface}+${R}+2.0+(${v_in}*step*dt)
+run             30000   # Indent for 60 ps (approx 6 Angstroms depth)
+
+# ----------------- 7. Unloading Simulation -----------
+# Reverse indenter velocity
+variable        v_out equal 0.1
+variable        z_max_load equal ${z_surface}+${R}+2.0+(${v_in}*30000*0.002)
+variable        z_indenter equal ${z_max_load}+(${v_out}*(step-40000)*dt)
+run             30000   # Unload for 60 ps
